@@ -9,6 +9,14 @@
 - `delegate_to_coder`: 将复杂编程任务委派给专用 Coder Agent，并在终端中流式打印其执行过程
 - `context handoff`: 子 Agent 会继承用户偏好、最近几轮对话摘要和当前激活的 skill
 
+运行时有两种交互模式：
+
+- TTY 模式：默认进入彩色 TUI，支持 slash command 自动补全
+- 非 TTY 模式：回退到标准 readline REPL，功能保持一致，但没有下拉补全
+- 传入 `--yolo`：跳过 `execute_code` 的逐次确认，主 Agent 和 Coder Agent 都会直接执行
+- 输入 `/exit`：正常退出 CLI
+- 连按两次 `Ctrl+C`：强制退出，无论当前是否正在执行任务
+
 ## 安装
 
 ```bash
@@ -18,7 +26,19 @@ npm install
 ## 运行
 
 ```bash
+# 配置 API 。例如配置 Deepseek
+export WONIU_PROVIDER=deepseek
+export WONIU_BASE_URL=https://api.deepseek.com/v1
+export WONIU_MODEL=deepseek-chat
+export WONIU_API_KEY=sk-xxx 
+
 npm start
+```
+
+如果要关闭执行确认：
+
+```bash
+npm start -- --yolo
 ```
 
 开发模式：
@@ -62,25 +82,6 @@ export WONIU_PROVIDER=ollama WONIU_BASE_URL=http://localhost:11434/v1 WONIU_MODE
 
 当前仓库自带 `translator` 示例 skill。项目目录和兼容的全局目录里新增 `SKILL.md` 后，当前会话里也能马上被发现。
 
-### 格式
-
-Skill 使用 `SKILL.md` 文件，格式与 pi-mono 兼容：
-
-```text
-skills/
-  my-skill/
-    SKILL.md
-```
-
-```markdown
----
-name: my-skill
-description: 一句简短说明
----
-
-这里放完整的专家提示词。
-```
-
 ### 目录扫描
 
 程序按优先级扫描以下目录，同名 skill 先到先得：
@@ -102,14 +103,17 @@ description: 一句简短说明
 用户主动调用：
 
 ```text
-❯ /                          # 列出所有可用 skills
+❯ /                          # 列出所有 slash commands 和 skills
 ❯ /skill:translator 你好     # 加载 translator skill + 发送 "你好"
+❯ /skills translator         # 按关键字过滤 slash commands / skills
 ❯ /skill:my-skill            # 如果磁盘上存在该 skill，会自动出现
 ```
 
 自动补全：
 
-- 输入 `/skill` 或 `/skill:前缀` 时，会自动显示匹配的 skills 下拉列表
+- 仅在 TTY/TUI 模式下可用
+- 输入 `/` 时会显示 slash commands 下拉列表，其中包含内置命令和发现到的 skills
+- 输入 `/skill` 或 `/skill:前缀` 时，会进一步收敛到匹配的 skill 命令
 - `↑/↓` 切换选项
 - `Tab` 接受当前补全，自动填入 `/skill:name `
 - `Enter` 提交当前输入
@@ -129,6 +133,7 @@ LLM 自动调用：
 ❯ /skill:translator "Code is read much more often than it is written"
 ❯ 后续输出简洁一点
 ❯ 帮我写一个 JavaScript 的斐波那契函数并执行前 10 个数
+  # Agent 会先展示待执行代码，再请求确认
 ❯ 改成递归版本
 ❯ 写一个快排然后交给 coder agent 完成
 ```
@@ -139,12 +144,13 @@ LLM 自动调用：
 .
 ├── package.json
 ├── README.md
+├── dist/                # 当前内置了一份 pi-mono TUI 依赖代码
 ├── skills/
 │   └── translator/
 │       └── SKILL.md
 └── src/
     ├── agents.ts        # Model 解析 + Skill 扫描 + Agent 工厂
     ├── index.ts         # Banner + REPL + Slash 命令
-    ├── skill-prompt.ts  # /skill 自动补全交互
+    ├── tui-shell.ts     # TUI 交互层 + slash command 自动补全
     └── tools.ts         # Tool 定义 + SKILL.md 解析
 ```

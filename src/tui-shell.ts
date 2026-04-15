@@ -26,7 +26,7 @@ function color(code: string, text: string): string {
   return `${code}${text}${RESET}`;
 }
 
-function buildBanner(provider: string, modelId: string, baseUrl?: string): string {
+function buildBanner(provider: string, modelId: string, yolo = false, baseUrl?: string): string {
   return [
     "",
     `${PURPLE}${BOLD}██╗    ██╗ ██████╗ ███╗   ██╗██╗██╗   ██╗${RESET}`,
@@ -39,7 +39,9 @@ function buildBanner(provider: string, modelId: string, baseUrl?: string): strin
     `      ${LILAC}Minimal Multi-Agent CLI${RESET}`,
     "",
     color(LILAC, `Provider: ${provider} | Model: ${modelId}${baseUrl ? ` | URL: ${baseUrl}` : ""}`),
-    color(DIM, "Type / for slash commands, // to send a leading slash, exit to quit"),
+    ...(yolo ? [color(DIM, "Mode: YOLO | execute_code runs without confirmation")] : []),
+    color(DIM, "Type / for slash commands, // to send a leading slash, /exit to quit"),
+    color(DIM, "Press Ctrl+C twice to force exit"),
   ].join("\n");
 }
 
@@ -88,8 +90,14 @@ export class TuiShell {
   private currentAssistantIndex: number | null = null;
   private started = false;
 
-  constructor(provider: string, modelId: string, baseUrl?: string) {
-    this.header.setText(buildBanner(provider, modelId, baseUrl));
+  constructor(
+    provider: string,
+    modelId: string,
+    yolo = false,
+    baseUrl?: string,
+    onCtrlC?: () => void,
+  ) {
+    this.header.setText(buildBanner(provider, modelId, yolo, baseUrl));
     this.editor.onSubmit = (text) => {
       const resolve = this.pendingSubmitResolve;
       if (!resolve) return;
@@ -103,7 +111,7 @@ export class TuiShell {
     this.tui.addChild(this.editor);
     this.tui.addInputListener((data) => {
       if (matchesKey(data, "ctrl+c")) {
-        this.abortPendingInput(new Error("SIGINT"));
+        onCtrlC?.();
         return { consume: true };
       }
       return undefined;
@@ -221,16 +229,6 @@ export class TuiShell {
       }
     }
   }
-
-  abortPendingInput(error: unknown): void {
-    const reject = this.pendingSubmitReject;
-    this.pendingSubmitResolve = undefined;
-    this.pendingSubmitReject = undefined;
-    if (reject) {
-      reject(error);
-    }
-  }
-
   private pushTranscriptEntry(text: string): void {
     this.transcriptEntries.push(text);
     this.flushTranscript();

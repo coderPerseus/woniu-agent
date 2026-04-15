@@ -21,6 +21,11 @@ const LILAC = "\x1b[38;5;147m";
 const PINK = "\x1b[38;5;141m";
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
+const FORCE_EXIT_WINDOW_MS = 5000;
+
+interface RuntimeOptions {
+  yolo: boolean;
+}
 
 function bannerText(): string {
   return `
@@ -35,9 +40,19 @@ ${PINK}${BOLD} ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═
 `;
 }
 
-function printConfig(provider: string, modelId: string, baseUrl?: string): void {
+function parseRuntimeOptions(argv = process.argv.slice(2)): RuntimeOptions {
+  return {
+    yolo: argv.includes("--yolo"),
+  };
+}
+
+function printConfig(provider: string, modelId: string, runtimeOptions: RuntimeOptions, baseUrl?: string): void {
   console.log(`${LILAC}Provider: ${provider} | Model: ${modelId}${baseUrl ? ` | URL: ${baseUrl}` : ""}${RESET}`);
-  console.log(`${DIM}Type / for slash commands, // to send a leading slash, exit to quit${RESET}\n`);
+  if (runtimeOptions.yolo) {
+    console.log(`${DIM}Mode: YOLO | execute_code runs without confirmation${RESET}`);
+  }
+  console.log(`${DIM}Type / for slash commands, // to send a leading slash, /exit to quit${RESET}`);
+  console.log(`${DIM}Press Ctrl+C twice to force exit${RESET}\n`);
 }
 
 function formatSlashCommandList(skills: SkillRecord[], query = ""): string {
@@ -69,7 +84,28 @@ function createConfirmExecution(rl: readline.Interface) {
   };
 }
 
-async function runFallbackCli(): Promise<void> {
+function createForceExitHandler(onFirstInterrupt: () => void): () => void {
+  let lastSignalAt = 0;
+  let lastHandledAt = 0;
+
+  return () => {
+    const now = Date.now();
+    if (now - lastHandledAt < 100) {
+      return;
+    }
+    lastHandledAt = now;
+
+    if (now - lastSignalAt <= FORCE_EXIT_WINDOW_MS) {
+      process.stdout.write(`\n${DIM}Force exiting...${RESET}\n`);
+      process.exit(130);
+    }
+
+    lastSignalAt = now;
+    onFirstInterrupt();
+  };
+}
+
+async function runFallbackCli(runtimeOptions: RuntimeOptions): Promise<void> {
   console.log(bannerText());
 
   const provider = process.env.WONIU_PROVIDER ?? "anthropic";
@@ -77,12 +113,21 @@ async function runFallbackCli(): Promise<void> {
   const baseUrl = process.env.WONIU_BASE_URL;
   const model = resolveModel();
 
-  printConfig(provider, modelId, baseUrl);
+  printConfig(provider, modelId, runtimeOptions, baseUrl);
 
   let { skills } = scanSkills();
   const rl = readline.createInterface({ input, output });
   const confirmExecution = createConfirmExecution(rl);
-  const agent = createOrchestrator(model, skills, { confirmExecution });
+  const handleForceExit = createForceExitHandler(() => {
+    process.stdout.write(`\n${DIM}Press Ctrl+C again to force exit, or use /exit for a clean shutdown.${RESET}\n`);
+  });
+
+  process.on("SIGINT", handleForceExit);
+  rl.on("SIGINT", handleForceExit);
+  const agent = createOrchestrator(model, skills, {
+    confirmExecution,
+    requireExecutionConfirm: !runtimeOptions.yolo,
+  });
 
   agent.subscribe((event) => {
     switch (event.type) {
@@ -120,22 +165,25 @@ async function runFallbackCli(): Promise<void> {
   try {
     while (true) {
       skills = scanSkills().skills;
-      refreshOrchestratorSkills(agent, model, skills, { confirmExecution });
+      refreshOrchestratorSkills(agent, model, skills, {
+        confirmExecution,
+        requireExecutionConfirm: !runtimeOptions.yolo,
+      });
       const raw = await rl.question(`${PURPLE}❯ ${RESET}`);
       const inputText = raw.trim();
 
       if (!inputText) continue;
-
-      if (inputText === "exit" || inputText === "quit") {
-        console.log(`${DIM}👋 Bye!${RESET}`);
-        break;
-      }
 
       const slashCommand = parseSlashCommandInput(inputText, skills);
       if (slashCommand) {
         if (slashCommand.kind === "escaped") {
           await runPrompt(slashCommand.text);
           continue;
+        }
+
+        if (slashCommand.kind === "exit") {
+          console.log(`${DIM}👋 Bye!${RESET}`);
+          break;
         }
 
         if (slashCommand.kind === "list") {
@@ -168,20 +216,30 @@ async function runFallbackCli(): Promise<void> {
       await runPrompt(inputText);
     }
   } finally {
+    process.off("SIGINT", handleForceExit);
+    rl.off("SIGINT", handleForceExit);
     rl.close();
   }
 }
 
-async function runTuiCli(): Promise<void> {
+async function runTuiCli(runtimeOptions: RuntimeOptions): Promise<void> {
   const provider = process.env.WONIU_PROVIDER ?? "anthropic";
   const modelId = process.env.WONIU_MODEL ?? "claude-sonnet-4-20250514";
   const baseUrl = process.env.WONIU_BASE_URL;
   const model = resolveModel();
 
   let { skills } = scanSkills();
-  const shell = new TuiShell(provider, modelId, baseUrl);
+  let shell: TuiShell;
+  const handleForceExit = createForceExitHandler(() => {
+    shell.addSystemMessage("Press Ctrl+C again to force exit, or use /exit for a clean shutdown.");
+  });
+  shell = new TuiShell(provider, modelId, runtimeOptions.yolo, baseUrl, handleForceExit);
   const confirmExecution = (language: ExecutionLanguage, code: string) => shell.confirmExecution(language, code);
-  const agent = createOrchestrator(model, skills, { confirmExecution });
+  process.on("SIGINT", handleForceExit);
+  const agent = createOrchestrator(model, skills, {
+    confirmExecution,
+    requireExecutionConfirm: !runtimeOptions.yolo,
+  });
 
   agent.subscribe((event) => {
     switch (event.type) {
@@ -227,22 +285,25 @@ async function runTuiCli(): Promise<void> {
   try {
     while (true) {
       skills = scanSkills().skills;
-      refreshOrchestratorSkills(agent, model, skills, { confirmExecution });
+      refreshOrchestratorSkills(agent, model, skills, {
+        confirmExecution,
+        requireExecutionConfirm: !runtimeOptions.yolo,
+      });
       const raw = await shell.ask(skills);
       const inputText = raw.trim();
 
       if (!inputText) continue;
-
-      if (inputText === "exit" || inputText === "quit") {
-        shell.addSystemMessage("👋 Bye!");
-        break;
-      }
 
       const slashCommand = parseSlashCommandInput(inputText, skills);
       if (slashCommand) {
         if (slashCommand.kind === "escaped") {
           await runPrompt(slashCommand.text, slashCommand.text);
           continue;
+        }
+
+        if (slashCommand.kind === "exit") {
+          shell.addSystemMessage("👋 Bye!");
+          break;
         }
 
         if (slashCommand.kind === "list") {
@@ -275,24 +336,21 @@ async function runTuiCli(): Promise<void> {
 
       await runPrompt(inputText, inputText);
     }
-  } catch (error) {
-    if (error instanceof Error && error.message === "SIGINT") {
-      shell.addSystemMessage("Interrupted.");
-    } else {
-      throw error;
-    }
   } finally {
+    process.off("SIGINT", handleForceExit);
     shell.stop();
   }
 }
 
 async function main(): Promise<void> {
+  const runtimeOptions = parseRuntimeOptions();
+
   if (!input.isTTY || !output.isTTY) {
-    await runFallbackCli();
+    await runFallbackCli(runtimeOptions);
     return;
   }
 
-  await runTuiCli();
+  await runTuiCli(runtimeOptions);
 }
 
 main().catch((error) => {

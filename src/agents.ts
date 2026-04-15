@@ -225,11 +225,13 @@ export interface SlashCommandRecord {
 
 export type ParsedSlashCommand =
   | { kind: "escaped"; text: string }
+  | { kind: "exit" }
   | { kind: "list"; query: string }
   | { kind: "run-skill"; skill: SkillRecord; args: string }
   | { kind: "unknown"; command: string; suggestions: SlashCommandRecord[] };
 
 const BUILTIN_SLASH_COMMANDS: ReadonlyArray<Omit<SlashCommandRecord, "source">> = [
+  { command: "/exit", description: "Exit the CLI." },
   { command: "/help", description: "Show available slash commands." },
   { command: "/skills", description: "List skills, optionally filtered by a query." },
   { command: "/skill", description: "Run a skill by name: /skill translator text to translate" },
@@ -311,6 +313,10 @@ export function parseSlashCommandInput(input: string, skills: SkillRecord[]): Pa
 
   if (trimmed.startsWith("//")) {
     return { kind: "escaped", text: trimmed.slice(1) };
+  }
+
+  if (trimmed === "/exit") {
+    return { kind: "exit" };
   }
 
   if (trimmed === "/" || trimmed === "/help" || trimmed === "/skill" || trimmed === "/skill:") {
@@ -472,6 +478,7 @@ export function resolveModel(): Model<any> {
 
 interface CreateOrchestratorOptions {
   confirmExecution?: ConfirmExecution;
+  requireExecutionConfirm?: boolean;
 }
 
 function extractMessageText(message: AgentMessage): string {
@@ -582,10 +589,12 @@ function applyOrchestratorConfig(
   skills: SkillRecord[],
   options: CreateOrchestratorOptions = {},
 ): void {
+  const requireExecutionConfirm = options.requireExecutionConfirm ?? true;
+
   agent.state.systemPrompt = ORCHESTRATOR_PROMPT(formatSkillMetadata(skills));
   agent.state.tools = [
     makeExecuteCodeTool({
-      requireConfirm: true,
+      requireConfirm: requireExecutionConfirm,
       confirmExecution: options.confirmExecution,
     }),
     makeLoadSkillTool(skills),
@@ -611,6 +620,8 @@ export function createOrchestrator(
 }
 
 export function createCoder(model: Model<any>, options: CreateOrchestratorOptions = {}): Agent {
+  const requireExecutionConfirm = options.requireExecutionConfirm ?? true;
+
   return new Agent({
     getApiKey: (provider) => resolveApiKey(provider),
     initialState: {
@@ -618,7 +629,7 @@ export function createCoder(model: Model<any>, options: CreateOrchestratorOption
       model,
       tools: [
         makeExecuteCodeTool({
-          requireConfirm: true,
+          requireConfirm: requireExecutionConfirm,
           confirmExecution: options.confirmExecution,
         }),
       ],
