@@ -2,6 +2,7 @@ import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
 import { createOrchestrator, expandSkillCommand, refreshOrchestratorSkills, resolveModel, scanSkills } from "./agents.js";
+import { SkillPrompt } from "./skill-prompt.js";
 import type { SkillRecord } from "./tools.js";
 import type { ExecutionLanguage } from "./tools.js";
 
@@ -94,6 +95,10 @@ async function main(): Promise<void> {
   let { skills } = scanSkills();
   const rl = readline.createInterface({ input, output });
   const confirmExecution = createConfirmExecution(rl);
+  const prompt = new SkillPrompt({
+    getSkills: () => skills,
+    fallbackAsk: (promptText) => rl.question(promptText),
+  });
 
   const agent = createOrchestrator(model, skills, { confirmExecution });
 
@@ -138,7 +143,7 @@ async function main(): Promise<void> {
     while (true) {
       skills = scanSkills().skills;
       refreshOrchestratorSkills(agent, model, skills, { confirmExecution });
-      const raw = await rl.question(`${purple}❯ ${reset}`);
+      const raw = await prompt.ask();
       const inputText = raw.trim();
 
       if (!inputText) continue;
