@@ -10,9 +10,45 @@ import { Agent } from "@mariozechner/pi-agent-core";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import YAML from "yaml";
 
+// ═══════════════════════════════════════════════
+// Shared Types
+// ═══════════════════════════════════════════════
+
+export interface SkillRecord {
+  name: string;
+  description: string;
+  source: "project" | "user";
+  filePath: string;
+  baseDir: string;
+}
+
 export type ExecutionLanguage = "shell" | "javascript" | "typescript";
 export type ConfirmExecution = (language: ExecutionLanguage, code: string) => Promise<boolean>;
 export type CreateCoderAgent = () => Agent;
+
+// ═══════════════════════════════════════════════
+// SKILL.md Frontmatter Parser
+// ═══════════════════════════════════════════════
+
+/**
+ * Parse YAML frontmatter from a SKILL.md file.
+ * Format: --- \n yaml \n --- \n body
+ */
+export function parseFrontmatter(content: string): { meta: Record<string, unknown>; body: string } {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { meta: {}, body: content.trim() };
+
+  try {
+    const meta = (YAML.parse(match[1]) as Record<string, unknown>) ?? {};
+    return { meta, body: match[2].trim() };
+  } catch {
+    return { meta: {}, body: content.trim() };
+  }
+}
+
+// ═══════════════════════════════════════════════
+// Tool Parameter Schemas
+// ═══════════════════════════════════════════════
 
 const ExecuteCodeParams = Type.Object({
   language: Type.Union([
@@ -31,6 +67,10 @@ const DelegateToCoderParams = Type.Object({
   task: Type.String({ description: "Programming task to delegate" }),
 });
 
+// ═══════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════
+
 interface ExecuteCodeOptions {
   requireConfirm?: boolean;
   confirmExecution?: ConfirmExecution;
@@ -41,10 +81,7 @@ function textContent(text: string): TextContent {
 }
 
 function toToolResult(content: string, details: Record<string, unknown> = {}) {
-  return {
-    content: [textContent(content)],
-    details,
-  };
+  return { content: [textContent(content)], details };
 }
 
 function trimOutput(output: string, maxLength = 4096): string {
@@ -57,18 +94,20 @@ function formatCombinedOutput(stdout: string, stderr: string): string {
   return pieces.join("\n");
 }
 
+// ═══════════════════════════════════════════════
+// Code Execution
+// ═══════════════════════════════════════════════
+
 function runShell(code: string): string {
   const result = spawnSync(code, {
     cwd: process.cwd(),
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
-    shell: true,
+    shell: process.env.SHELL || true,
     timeout: 30_000,
   });
 
-  if (result.error) {
-    throw result.error;
-  }
+  if (result.error) throw result.error;
 
   const output = formatCombinedOutput(result.stdout ?? "", result.stderr ?? "");
   if (result.status !== 0) {
@@ -92,9 +131,7 @@ function runScript(language: Exclude<ExecutionLanguage, "shell">, code: string):
       timeout: 30_000,
     });
 
-    if (result.error) {
-      throw result.error;
-    }
+    if (result.error) throw result.error;
 
     const output = formatCombinedOutput(result.stdout ?? "", result.stderr ?? "");
     if (result.status !== 0) {
@@ -117,10 +154,7 @@ async function defaultConfirmExecution(language: ExecutionLanguage, code: string
   process.stdout.write(`${cyan}${code}${reset}\n`);
   process.stdout.write(`${dim}└──────────────────────────────${reset}\n`);
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
   try {
     const answer = await rl.question(`${yellow}  Execute? [Y/n] ${reset}`);
@@ -130,19 +164,9 @@ async function defaultConfirmExecution(language: ExecutionLanguage, code: string
   }
 }
 
-export async function askConfirmation(question: string): Promise<boolean> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
-  try {
-    const answer = await rl.question(question);
-    return answer.trim().toLowerCase() !== "n";
-  } finally {
-    rl.close();
-  }
-}
+// ═══════════════════════════════════════════════
+// Tool: execute_code
+// ═══════════════════════════════════════════════
 
 export function makeExecuteCodeTool(options: ExecuteCodeOptions = {}): AgentTool<typeof ExecuteCodeParams, Record<string, unknown>> {
   const requireConfirm = options.requireConfirm ?? true;
@@ -170,55 +194,47 @@ export function makeExecuteCodeTool(options: ExecuteCodeOptions = {}): AgentTool
   };
 }
 
-function listAvailableSkills(skillDirs: string[]): string[] {
-  const names = new Set<string>();
+// ═══════════════════════════════════════════════
+// Tool: load_skill
+// ═══════════════════════════════════════════════
 
-  for (const dir of skillDirs) {
-    if (!fs.existsSync(dir)) continue;
-    for (const entry of fs.readdirSync(dir)) {
-      if (entry.endsWith(".yaml")) names.add(entry.replace(/\.yaml$/, ""));
-    }
-  }
-
-  return [...names].sort();
-}
-
-export function makeLoadSkillTool(skillDirs: string[]): AgentTool<typeof LoadSkillParams, Record<string, unknown>> {
+export function makeLoadSkillTool(skills: SkillRecord[]): AgentTool<typeof LoadSkillParams, Record<string, unknown>> {
   return {
     name: "load_skill",
     label: "Load Skill",
-    description: "Load the full prompt of a named skill from project or user skill directories.",
+    description: "Load the full prompt of a named skill (SKILL.md).",
     parameters: LoadSkillParams,
     execute: async (_toolCallId, params) => {
-      for (const dir of skillDirs) {
-        const filePath = path.join(dir, `${params.name}.yaml`);
-        if (!fs.existsSync(filePath)) continue;
+      const skill = skills.find((s) => s.name === params.name);
 
-        const raw = fs.readFileSync(filePath, "utf8");
-        const parsed = YAML.parse(raw) as { name?: string; description?: string; prompt?: string } | null;
-        const skillName = parsed?.name ?? params.name;
-        const prompt = parsed?.prompt?.trim();
-        const description = parsed?.description?.trim();
-
-        if (!prompt) {
-          throw new Error(`Skill "${skillName}" is missing a prompt.`);
-        }
-
-        const blocks = [
-          `<skill name="${skillName}">`,
-          description ? `description: ${description}` : "",
-          prompt,
-          "</skill>",
-        ].filter(Boolean);
-
-        return toToolResult(blocks.join("\n"), { filePath });
+      if (!skill) {
+        const available = skills.map((s) => s.name).join(", ");
+        throw new Error(`Skill "${params.name}" not found. Available: ${available || "(none)"}`);
       }
 
-      const available = listAvailableSkills(skillDirs);
-      throw new Error(`Skill "${params.name}" not found. Available: ${available.join(", ") || "(none)"}`);
+      const content = fs.readFileSync(skill.filePath, "utf8");
+      const { meta, body } = parseFrontmatter(content);
+
+      if (!body) {
+        throw new Error(`Skill "${skill.name}" has no content.`);
+      }
+
+      const description = (meta.description as string)?.trim();
+      const blocks = [
+        `<skill name="${skill.name}">`,
+        description ? `description: ${description}` : "",
+        body,
+        "</skill>",
+      ].filter(Boolean);
+
+      return toToolResult(blocks.join("\n"), { filePath: skill.filePath });
     },
   };
 }
+
+// ═══════════════════════════════════════════════
+// Tool: delegate_to_coder
+// ═══════════════════════════════════════════════
 
 function extractAssistantText(agent: Agent): string {
   for (let index = agent.state.messages.length - 1; index >= 0; index -= 1) {

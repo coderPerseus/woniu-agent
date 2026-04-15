@@ -5,7 +5,7 @@
 它提供三类核心能力：
 
 - `execute_code`: 执行 shell、JavaScript、TypeScript，主 Agent 执行前会请求确认
-- `load_skill`: 从项目级 `./skills` 和用户级 `~/.woniu/skills` 加载技能 Prompt
+- `load_skill`: 从 SKILL.md 加载技能 Prompt（LLM 自动决定）
 - `delegate_to_coder`: 将复杂编程任务委派给专用 Coder Agent，并在终端中流式打印其执行过程
 
 ## 安装
@@ -36,10 +36,10 @@ npm run typecheck
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `WONIU_API_KEY` | 通常需要 | - | Provider API key，自定义 OpenAI 兼容端点也走这里 |
+| `WONIU_API_KEY` | 通常需要 | - | Provider API key |
 | `WONIU_PROVIDER` | 否 | `anthropic` | Provider 名称 |
 | `WONIU_MODEL` | 否 | `claude-sonnet-4-20250514` | 模型 ID |
-| `WONIU_BASE_URL` | 否 | - | 自定义 OpenAI 兼容端点，设置后不走内置 model registry |
+| `WONIU_BASE_URL` | 否 | - | 自定义 OpenAI 兼容端点 |
 
 示例：
 
@@ -48,44 +48,81 @@ npm run typecheck
 export WONIU_API_KEY=sk-ant-xxx
 
 # OpenAI
-export WONIU_PROVIDER=openai
-export WONIU_MODEL=gpt-4o
-export WONIU_API_KEY=sk-xxx
+export WONIU_PROVIDER=openai WONIU_MODEL=gpt-4o WONIU_API_KEY=sk-xxx
 
 # DeepSeek
-export WONIU_PROVIDER=deepseek
-export WONIU_BASE_URL=https://api.deepseek.com/v1
-export WONIU_MODEL=deepseek-chat
-export WONIU_API_KEY=sk-xxx
+export WONIU_PROVIDER=deepseek WONIU_BASE_URL=https://api.deepseek.com/v1 WONIU_MODEL=deepseek-chat WONIU_API_KEY=sk-xxx
 
 # Ollama
-export WONIU_PROVIDER=ollama
-export WONIU_BASE_URL=http://localhost:11434/v1
-export WONIU_MODEL=llama3
+export WONIU_PROVIDER=ollama WONIU_BASE_URL=http://localhost:11434/v1 WONIU_MODEL=llama3
 ```
 
-## Skill 目录
+## Skill 系统
 
-- 项目级：`./skills`
-- 用户级：`~/.woniu/skills`
+### 格式
 
-同名 skill 由项目级覆盖用户级。程序启动时会自动创建 `~/.woniu/skills`。
+Skill 使用 `SKILL.md` 文件（YAML frontmatter + Markdown body），与 pi-mono 兼容：
 
-示例 skill 文件：
+```
+skills/
+  my-skill/
+    SKILL.md
+```
 
-```yaml
+SKILL.md 格式：
+
+```markdown
+---
 name: my-skill
 description: 一句简短说明
-prompt: |
-  这里放完整的专家提示词。
+---
+
+这里放完整的专家提示词。
 ```
+
+### 目录扫描
+
+程序按优先级扫描以下目录（同名 skill 先到先得）：
+
+1. `./skills/` — 项目级（woniu-code 自身）
+2. `.pi/skills/` — pi-mono 项目级
+3. `.agents/skills/` — 当前目录到 git repo root 的祖先目录共享 skills
+4. `~/.pi/agent/skills/` — pi-mono 用户级
+5. `~/.agents/skills/` — 其他 agent 共享的用户级 skills
+
+发现规则：
+
+- 目录中只要存在 `SKILL.md`，该目录就会被当作一个 skill root
+- 会递归扫描子目录寻找 `SKILL.md`
+- 普通 `.md` 文件不会被当作 skill，只有 `SKILL.md` 会被识别
+
+### 使用方式
+
+**方式一：`/` 命令（用户主动调用）**
+
+```
+❯ /                          # 列出所有可用 skills
+❯ /skill:translator 你好     # 加载 translator skill + 发送 "你好"
+❯ /skill:code-reviewer       # 仅加载 skill（无额外参数）
+❯ /skill:skill-creator       # 如果 ~/.agents/skills 中存在该 skill，会自动出现
+```
+
+**方式二：LLM 自动调用**
+
+Orchestrator 的 system prompt 包含所有 skill 元数据。LLM 可以自主调用 `load_skill` tool 按需加载。
+
+`/` 和 `/skill:name` 每次输入前都会重新扫描磁盘，所以新创建的 skill 在当前会话里也能立刻看到。
 
 ## Demo 用法
 
 ```text
+❯ /
+  /skill:translator    — 精准翻译文本，保持语气和风格 [project]
+  /skill:code-reviewer — 审查代码质量，发现潜在问题 [project]
+
+❯ /skill:translator "Code is read much more often than it is written"
 ❯ 帮我写一个 JavaScript 的斐波那契函数并执行前 10 个数
 ❯ 改成递归版本
-❯ 翻译 "Code is read much more often than it is written"
 ❯ 写一个快排然后帮我 review
 ```
 
@@ -96,10 +133,12 @@ prompt: |
 ├── package.json
 ├── README.md
 ├── skills/
-│   ├── code-reviewer.yaml
-│   └── translator.yaml
+│   ├── code-reviewer/
+│   │   └── SKILL.md
+│   └── translator/
+│       └── SKILL.md
 └── src/
-    ├── agents.ts
-    ├── index.ts
-    └── tools.ts
+    ├── agents.ts    # Model 解析 + Skill 扫描 + Agent 工厂
+    ├── index.ts     # Banner + REPL + Slash 命令
+    └── tools.ts     # Tool 定义 + 前置解析器
 ```

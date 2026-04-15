@@ -1,8 +1,13 @@
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { createOrchestrator, resolveModel } from "./agents.js";
+import { createOrchestrator, expandSkillCommand, refreshOrchestratorSkills, resolveModel, scanSkills } from "./agents.js";
+import type { SkillRecord } from "./tools.js";
 import type { ExecutionLanguage } from "./tools.js";
+
+// ═══════════════════════════════════════════════
+// Banner
+// ═══════════════════════════════════════════════
 
 function printBanner(): void {
   const p1 = "\x1b[38;5;183m";
@@ -28,8 +33,33 @@ function printConfig(provider: string, modelId: string, baseUrl?: string): void 
   const reset = "\x1b[0m";
 
   console.log(`${dim}Provider: ${provider} | Model: ${modelId}${baseUrl ? ` | URL: ${baseUrl}` : ""}${reset}`);
-  console.log(`${dim}Type "exit" to quit${reset}\n`);
+  console.log(`${dim}Type / to list skills, exit to quit${reset}\n`);
 }
+
+// ═══════════════════════════════════════════════
+// Slash Commands
+// ═══════════════════════════════════════════════
+
+function printSkillList(skills: SkillRecord[]): void {
+  const purple = "\x1b[38;5;183m";
+  const dim = "\x1b[2m";
+  const reset = "\x1b[0m";
+
+  if (skills.length === 0) {
+    console.log(`${dim}No skills available.${reset}`);
+    return;
+  }
+
+  console.log(`${dim}Available skills:${reset}`);
+  for (const skill of skills) {
+    console.log(`  ${purple}/skill:${skill.name}${reset} ${dim}— ${skill.description} [${skill.source}]${reset}`);
+  }
+  console.log(`${dim}Usage: /skill:name [your message]${reset}`);
+}
+
+// ═══════════════════════════════════════════════
+// Confirmation Callback
+// ═══════════════════════════════════════════════
 
 function createConfirmExecution(rl: readline.Interface) {
   return async (language: ExecutionLanguage, code: string): Promise<boolean> => {
@@ -47,6 +77,10 @@ function createConfirmExecution(rl: readline.Interface) {
   };
 }
 
+// ═══════════════════════════════════════════════
+// Main
+// ═══════════════════════════════════════════════
+
 async function main(): Promise<void> {
   printBanner();
 
@@ -57,10 +91,11 @@ async function main(): Promise<void> {
 
   printConfig(provider, modelId, baseUrl);
 
+  let { skills } = scanSkills();
   const rl = readline.createInterface({ input, output });
-  const agent = createOrchestrator(model, {
-    confirmExecution: createConfirmExecution(rl),
-  });
+  const confirmExecution = createConfirmExecution(rl);
+
+  const agent = createOrchestrator(model, skills, { confirmExecution });
 
   const dim = "\x1b[2m";
   const purple = "\x1b[38;5;183m";
@@ -89,8 +124,20 @@ async function main(): Promise<void> {
     }
   });
 
+  const runPrompt = async (text: string) => {
+    try {
+      await agent.prompt(text);
+      await agent.waitForIdle();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`\x1b[31mError:${reset} ${message}`);
+    }
+  };
+
   try {
     while (true) {
+      skills = scanSkills().skills;
+      refreshOrchestratorSkills(agent, model, skills, { confirmExecution });
       const raw = await rl.question(`${purple}❯ ${reset}`);
       const inputText = raw.trim();
 
@@ -101,13 +148,24 @@ async function main(): Promise<void> {
         break;
       }
 
-      try {
-        await agent.prompt(inputText);
-        await agent.waitForIdle();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(`\x1b[31mError:${reset} ${message}`);
+      // "/" or "/skills" → list all available skills
+      if (inputText === "/" || inputText === "/skills") {
+        printSkillList(skills);
+        continue;
       }
+
+      // "/skill:name [args]" → expand skill content, send as prompt
+      if (inputText.startsWith("/skill:")) {
+        const expanded = expandSkillCommand(inputText, skills);
+        if (!expanded) {
+          console.log(`${dim}Skill not found. Type / to list available skills.${reset}`);
+          continue;
+        }
+        await runPrompt(expanded);
+        continue;
+      }
+
+      await runPrompt(inputText);
     }
   } finally {
     rl.close();

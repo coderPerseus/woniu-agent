@@ -2,28 +2,22 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { getEnvApiKey, getModel } from "@mariozechner/pi-ai";
+import { getEnvApiKey, getModels } from "@mariozechner/pi-ai";
 import type { KnownProvider, Model } from "@mariozechner/pi-ai";
 import { Agent } from "@mariozechner/pi-agent-core";
-import YAML from "yaml";
 
 import {
   type ConfirmExecution,
+  type SkillRecord,
   makeDelegateToCoderTool,
   makeExecuteCodeTool,
   makeLoadSkillTool,
+  parseFrontmatter,
 } from "./tools.js";
 
-interface SkillRecord {
-  name: string;
-  description: string;
-  source: "project" | "user";
-  filePath: string;
-}
-
-interface CreateOrchestratorOptions {
-  confirmExecution?: ConfirmExecution;
-}
+// ═══════════════════════════════════════════════
+// System Prompts
+// ═══════════════════════════════════════════════
 
 const ORCHESTRATOR_PROMPT = (skillList: string) => `You are Woniu Code, a concise terminal AI assistant.
 
@@ -56,56 +50,204 @@ Rules:
 - If execution fails, diagnose and retry when the next step is obvious.
 `;
 
-function getSkillDirs(): string[] {
-  const projectDir = path.join(process.cwd(), "skills");
-  const userDir = path.join(os.homedir(), ".woniu", "skills");
-  fs.mkdirSync(userDir, { recursive: true });
-  return [projectDir, userDir];
+// ═══════════════════════════════════════════════
+// Skill Discovery
+// ═══════════════════════════════════════════════
+
+/**
+ * Scan directories for skills.
+ *
+ * Precedence (first found wins on name collision):
+ *   1. ./skills/                 — woniu project-level
+ *   2. .pi/skills/               — pi project-level
+ *   3. .agents/skills/           — project/ancestor shared skills
+ *   4. ~/.pi/agent/skills/       — pi user-level
+ *   5. ~/.agents/skills/         — shared user-level skills
+ */
+interface SkillDirSpec {
+  dir: string;
+  source: SkillRecord["source"];
 }
 
-function loadSkillYaml(filePath: string): { name?: string; description?: string } | null {
-  try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    return YAML.parse(raw) as { name?: string; description?: string } | null;
-  } catch {
-    return null;
+function findGitRepoRoot(startDir: string): string | null {
+  let dir = path.resolve(startDir);
+
+  while (true) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
 }
 
-export function scanSkills(): { metadata: string; dirs: string[] } {
+function collectAncestorAgentsSkillDirs(startDir: string): string[] {
+  const dirs: string[] = [];
+  const gitRepoRoot = findGitRepoRoot(startDir);
+  let dir = path.resolve(startDir);
+
+  while (true) {
+    dirs.push(path.join(dir, ".agents", "skills"));
+
+    if (gitRepoRoot && dir === gitRepoRoot) break;
+
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  return dirs;
+}
+
+function dedupePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  for (const target of paths) {
+    const resolved = path.resolve(target);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    deduped.push(resolved);
+  }
+
+  return deduped;
+}
+
+function getSkillDirs(): SkillDirSpec[] {
+  const cwd = process.cwd();
+  const homeDir = os.homedir();
+
+  return [
+    { dir: path.join(cwd, "skills"), source: "project" },
+    { dir: path.join(cwd, ".pi", "skills"), source: "project" },
+    ...dedupePaths(collectAncestorAgentsSkillDirs(cwd)).map((dir) => ({
+      dir,
+      source: "project" as const,
+    })),
+    { dir: path.join(homeDir, ".pi", "agent", "skills"), source: "user" },
+    { dir: path.join(homeDir, ".agents", "skills"), source: "user" },
+  ];
+}
+
+function scanSkillFiles(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  for (const entry of entries) {
+    if (entry.name === "SKILL.md" && entry.isFile()) {
+      return [path.join(dir, entry.name)];
+    }
+  }
+
+  const files: string[] = [];
+
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...scanSkillFiles(fullPath));
+      continue;
+    }
+  }
+
+  return files;
+}
+
+function getSkillName(filePath: string, meta: Record<string, unknown>): string {
+  const declaredName = typeof meta.name === "string" ? meta.name.trim() : "";
+  if (declaredName) return declaredName;
+
+  return path.basename(filePath) === "SKILL.md"
+    ? path.basename(path.dirname(filePath))
+    : path.basename(filePath, path.extname(filePath));
+}
+
+export function scanSkills(): { skills: SkillRecord[] } {
   const dirs = getSkillDirs();
   const skills = new Map<string, SkillRecord>();
 
-  for (const dir of dirs) {
-    if (!fs.existsSync(dir)) continue;
-    const source: SkillRecord["source"] = dir.includes(`${path.sep}.woniu${path.sep}`) ? "user" : "project";
+  for (const spec of dirs) {
+    const filePaths = scanSkillFiles(spec.dir);
 
-    for (const entry of fs.readdirSync(dir)) {
-      if (!entry.endsWith(".yaml")) continue;
+    for (const skillMdPath of filePaths) {
+      let content: string;
+      try {
+        content = fs.readFileSync(skillMdPath, "utf8");
+      } catch {
+        continue;
+      }
 
-      const filePath = path.join(dir, entry);
-      const parsed = loadSkillYaml(filePath);
-      const name = parsed?.name?.trim() || entry.replace(/\.yaml$/, "");
+      const { meta } = parseFrontmatter(content);
+      const name = getSkillName(skillMdPath, meta);
+      const description = typeof meta.description === "string" ? meta.description.trim() : "";
+
       if (skills.has(name)) continue;
+      if (!description) continue;
 
       skills.set(name, {
         name,
-        description: parsed?.description?.trim() || "No description",
-        source,
-        filePath,
+        description,
+        source: spec.source,
+        filePath: skillMdPath,
+        baseDir: path.dirname(skillMdPath),
       });
     }
   }
 
-  const metadata = [...skills.values()]
-    .map((skill) => `- ${skill.name}: ${skill.description} [${skill.source}]`)
-    .join("\n");
-
-  return {
-    metadata: metadata || "(no skills available)",
-    dirs,
-  };
+  return { skills: [...skills.values()] };
 }
+
+// ═══════════════════════════════════════════════
+// Slash Command Expansion
+// ═══════════════════════════════════════════════
+
+/**
+ * Expand /skill:name [args] into a prompt string.
+ *
+ * Follows pi-mono's pattern: read SKILL.md, strip frontmatter,
+ * wrap body in <skill> tags, append user args.
+ */
+export function expandSkillCommand(input: string, skills: SkillRecord[]): string | null {
+  if (!input.startsWith("/skill:")) return null;
+
+  const spaceIdx = input.indexOf(" ");
+  const skillName = spaceIdx === -1 ? input.slice(7) : input.slice(7, spaceIdx);
+  const args = spaceIdx === -1 ? "" : input.slice(spaceIdx + 1).trim();
+
+  const skill = skills.find((s) => s.name === skillName);
+  if (!skill) return null;
+
+  let content: string;
+  try {
+    content = fs.readFileSync(skill.filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const { body } = parseFrontmatter(content);
+  if (!body) return null;
+
+  const block = [
+    `<skill name="${skill.name}" location="${skill.filePath}">`,
+    `References are relative to ${skill.baseDir}.`,
+    "",
+    body,
+    "</skill>",
+  ].join("\n");
+
+  return args ? `${block}\n\n${args}` : block;
+}
+
+// ═══════════════════════════════════════════════
+// Model & API Key
+// ═══════════════════════════════════════════════
 
 function setProviderApiKey(provider: string, apiKey: string): void {
   const envKeyMap: Record<string, string> = {
@@ -154,7 +296,10 @@ export function resolveModel(): Model<any> {
   }
 
   try {
-    return getModel(provider as KnownProvider, modelId as never);
+    const knownProvider = provider as KnownProvider;
+    const model = getModels(knownProvider).find((entry) => entry.id === modelId);
+    if (model) return model;
+    throw new Error("Model not found");
   } catch {
     console.error(`\x1b[31mError: Cannot find model "${modelId}" for provider "${provider}".\x1b[0m`);
     console.error(`\x1b[31mSet WONIU_BASE_URL to use a custom OpenAI-compatible endpoint.\x1b[0m`);
@@ -162,24 +307,49 @@ export function resolveModel(): Model<any> {
   }
 }
 
-export function createOrchestrator(model: Model<any>, options: CreateOrchestratorOptions = {}): Agent {
-  const { metadata, dirs } = scanSkills();
+// ═══════════════════════════════════════════════
+// Agent Factories
+// ═══════════════════════════════════════════════
 
-  return new Agent({
+interface CreateOrchestratorOptions {
+  confirmExecution?: ConfirmExecution;
+}
+
+function formatSkillMetadata(skills: SkillRecord[]): string {
+  return skills.length > 0
+    ? skills.map((skill) => `- ${skill.name}: ${skill.description} [${skill.source}]`).join("\n")
+    : "(no skills available)";
+}
+
+function applyOrchestratorConfig(
+  agent: Agent,
+  model: Model<any>,
+  skills: SkillRecord[],
+  options: CreateOrchestratorOptions = {},
+): void {
+  agent.state.systemPrompt = ORCHESTRATOR_PROMPT(formatSkillMetadata(skills));
+  agent.state.tools = [
+    makeExecuteCodeTool({
+      requireConfirm: true,
+      confirmExecution: options.confirmExecution,
+    }),
+    makeLoadSkillTool(skills),
+    makeDelegateToCoderTool(() => createCoder(model)),
+  ];
+}
+
+export function createOrchestrator(
+  model: Model<any>,
+  skills: SkillRecord[],
+  options: CreateOrchestratorOptions = {},
+): Agent {
+  const agent = new Agent({
     getApiKey: (provider) => resolveApiKey(provider),
-    initialState: {
-      systemPrompt: ORCHESTRATOR_PROMPT(metadata),
-      model,
-      tools: [
-        makeExecuteCodeTool({
-          requireConfirm: true,
-          confirmExecution: options.confirmExecution,
-        }),
-        makeLoadSkillTool(dirs),
-        makeDelegateToCoderTool(() => createCoder(model)),
-      ],
-    },
+    initialState: { model },
   });
+
+  applyOrchestratorConfig(agent, model, skills, options);
+  return agent;
 }
 
 export function createCoder(model: Model<any>): Agent {
@@ -193,4 +363,13 @@ export function createCoder(model: Model<any>): Agent {
       ],
     },
   });
+}
+
+export function refreshOrchestratorSkills(
+  agent: Agent,
+  model: Model<any>,
+  skills: SkillRecord[],
+  options: CreateOrchestratorOptions = {},
+): void {
+  applyOrchestratorConfig(agent, model, skills, options);
 }
