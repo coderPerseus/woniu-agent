@@ -214,8 +214,162 @@ export function scanSkills(): { skills: SkillRecord[] } {
 }
 
 // ═══════════════════════════════════════════════
-// Slash Command Expansion
+// Slash Commands
 // ═══════════════════════════════════════════════
+
+export interface SlashCommandRecord {
+  command: string;
+  description: string;
+  source: "builtin" | SkillRecord["source"];
+}
+
+export type ParsedSlashCommand =
+  | { kind: "escaped"; text: string }
+  | { kind: "list"; query: string }
+  | { kind: "run-skill"; skill: SkillRecord; args: string }
+  | { kind: "unknown"; command: string; suggestions: SlashCommandRecord[] };
+
+const BUILTIN_SLASH_COMMANDS: ReadonlyArray<Omit<SlashCommandRecord, "source">> = [
+  { command: "/help", description: "Show available slash commands." },
+  { command: "/skills", description: "List skills, optionally filtered by a query." },
+  { command: "/skill", description: "Run a skill by name: /skill translator text to translate" },
+];
+
+function normalizeSlashQuery(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function compareSlashCommands(left: SlashCommandRecord, right: SlashCommandRecord): number {
+  const leftBuiltin = left.source === "builtin" ? 0 : 1;
+  const rightBuiltin = right.source === "builtin" ? 0 : 1;
+  if (leftBuiltin !== rightBuiltin) return leftBuiltin - rightBuiltin;
+  return left.command.localeCompare(right.command);
+}
+
+function scoreSlashCommand(record: SlashCommandRecord, query: string): number {
+  if (!query) return 0;
+
+  const normalizedCommand = record.command.toLowerCase();
+  const normalizedDescription = record.description.toLowerCase();
+  const normalizedQuery = query.toLowerCase();
+
+  if (normalizedCommand === `/${normalizedQuery}`) return 0;
+  if (normalizedCommand.startsWith(`/${normalizedQuery}`)) return 1;
+  if (normalizedCommand.includes(normalizedQuery)) return 2;
+  if (normalizedDescription.includes(normalizedQuery)) return 3;
+  return 99;
+}
+
+function resolveSkillByName(skills: SkillRecord[], skillName: string): SkillRecord | null {
+  const exact = skills.find((skill) => skill.name === skillName);
+  if (exact) return exact;
+
+  const normalized = skillName.toLowerCase();
+  const insensitive = skills.filter((skill) => skill.name.toLowerCase() === normalized);
+  return insensitive.length === 1 ? insensitive[0] : null;
+}
+
+export function getSlashCommandRecords(skills: SkillRecord[]): SlashCommandRecord[] {
+  const builtin = BUILTIN_SLASH_COMMANDS.map((command) => ({
+    ...command,
+    source: "builtin" as const,
+  }));
+
+  const skillCommands = skills.map((skill) => ({
+    command: `/skill:${skill.name}`,
+    description: skill.description,
+    source: skill.source,
+  }));
+
+  return [...builtin, ...skillCommands].sort(compareSlashCommands);
+}
+
+export function searchSlashCommands(
+  skills: SkillRecord[],
+  query: string,
+  maxResults = 8,
+): SlashCommandRecord[] {
+  const normalizedQuery = normalizeSlashQuery(query).replace(/^\//, "");
+  const allCommands = getSlashCommandRecords(skills);
+
+  const filtered = normalizedQuery
+    ? allCommands.filter((record) => scoreSlashCommand(record, normalizedQuery) < 99)
+    : allCommands;
+
+  return filtered
+    .sort((left, right) => {
+      const scoreDiff = scoreSlashCommand(left, normalizedQuery) - scoreSlashCommand(right, normalizedQuery);
+      if (scoreDiff !== 0) return scoreDiff;
+      return compareSlashCommands(left, right);
+    })
+    .slice(0, maxResults);
+}
+
+export function parseSlashCommandInput(input: string, skills: SkillRecord[]): ParsedSlashCommand | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) return null;
+
+  if (trimmed.startsWith("//")) {
+    return { kind: "escaped", text: trimmed.slice(1) };
+  }
+
+  if (trimmed === "/" || trimmed === "/help" || trimmed === "/skill" || trimmed === "/skill:") {
+    return { kind: "list", query: "" };
+  }
+
+  const skillsMatch = trimmed.match(/^\/skills(?:\s+(.+))?$/);
+  if (skillsMatch) {
+    const query = skillsMatch[1]?.trim() ?? "";
+    return { kind: "list", query };
+  }
+
+  if (trimmed.startsWith("/skill:")) {
+    const payload = trimmed.slice("/skill:".length);
+    const separator = payload.search(/\s/);
+    const skillName = separator === -1 ? payload : payload.slice(0, separator);
+    const args = separator === -1 ? "" : payload.slice(separator).trim();
+    const skill = resolveSkillByName(skills, skillName);
+
+    if (skill) {
+      return { kind: "run-skill", skill, args };
+    }
+
+    return {
+      kind: "unknown",
+      command: `/skill:${skillName}`,
+      suggestions: searchSlashCommands(skills, skillName),
+    };
+  }
+
+  if (trimmed.startsWith("/skill ")) {
+    const payload = trimmed.slice("/skill ".length).trim();
+    if (!payload) {
+      return { kind: "list", query: "" };
+    }
+
+    const separator = payload.search(/\s/);
+    const skillName = separator === -1 ? payload : payload.slice(0, separator);
+    const args = separator === -1 ? "" : payload.slice(separator).trim();
+    const skill = resolveSkillByName(skills, skillName);
+
+    if (skill) {
+      return { kind: "run-skill", skill, args };
+    }
+
+    return {
+      kind: "unknown",
+      command: `/skill ${skillName}`,
+      suggestions: searchSlashCommands(skills, skillName),
+    };
+  }
+
+  const command = trimmed.slice(1).split(/\s+/, 1)[0] ?? "";
+  return {
+    kind: "unknown",
+    command: `/${command}`,
+    suggestions: searchSlashCommands(skills, command),
+  };
+}
 
 /**
  * Expand /skill:name [args] into a prompt string.
@@ -224,14 +378,10 @@ export function scanSkills(): { skills: SkillRecord[] } {
  * wrap body in <skill> tags, append user args.
  */
 export function expandSkillCommand(input: string, skills: SkillRecord[]): string | null {
-  if (!input.startsWith("/skill:")) return null;
+  const parsed = parseSlashCommandInput(input, skills);
+  if (!parsed || parsed.kind !== "run-skill") return null;
 
-  const spaceIdx = input.indexOf(" ");
-  const skillName = spaceIdx === -1 ? input.slice(7) : input.slice(7, spaceIdx);
-  const args = spaceIdx === -1 ? "" : input.slice(spaceIdx + 1).trim();
-
-  const skill = skills.find((s) => s.name === skillName);
-  if (!skill) return null;
+  const { skill, args } = parsed;
 
   let content: string;
   try {
