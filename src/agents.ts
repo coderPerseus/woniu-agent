@@ -5,9 +5,11 @@ import * as path from "node:path";
 import { getEnvApiKey, getModels } from "@mariozechner/pi-ai";
 import type { KnownProvider, Model } from "@mariozechner/pi-ai";
 import { Agent } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
 
 import {
   type ConfirmExecution,
+  type DelegationContext,
   type SkillRecord,
   makeDelegateToCoderTool,
   makeExecuteCodeTool,
@@ -49,6 +51,13 @@ Rules:
 - Prefer small, clear implementations.
 - If execution fails, diagnose and retry when the next step is obvious.
 `;
+
+const PROVIDER_ENV_KEYS: Record<string, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  groq: "GROQ_API_KEY",
+  xai: "XAI_API_KEY",
+};
 
 // ═══════════════════════════════════════════════
 // Skill Discovery
@@ -250,24 +259,18 @@ export function expandSkillCommand(input: string, skills: SkillRecord[]): string
 // ═══════════════════════════════════════════════
 
 function setProviderApiKey(provider: string, apiKey: string): void {
-  const envKeyMap: Record<string, string> = {
-    anthropic: "ANTHROPIC_API_KEY",
-    openai: "OPENAI_API_KEY",
-    groq: "GROQ_API_KEY",
-    xai: "XAI_API_KEY",
-  };
-
-  const envKey = envKeyMap[provider] ?? "OPENAI_API_KEY";
+  const envKey = PROVIDER_ENV_KEYS[provider] ?? `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
   process.env[envKey] = apiKey;
 }
 
 export function resolveApiKey(provider: string): string | undefined {
-  return process.env.WONIU_API_KEY
-    || getEnvApiKey(provider as KnownProvider)
-    || process.env.OPENAI_API_KEY
-    || process.env.ANTHROPIC_API_KEY
-    || process.env.GROQ_API_KEY
-    || process.env.XAI_API_KEY;
+  if (process.env.WONIU_API_KEY) return process.env.WONIU_API_KEY;
+
+  const providerKey = getEnvApiKey(provider as KnownProvider);
+  if (providerKey) return providerKey;
+
+  const envKey = PROVIDER_ENV_KEYS[provider] ?? `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+  return process.env[envKey];
 }
 
 export function resolveModel(): Model<any> {
@@ -295,6 +298,12 @@ export function resolveModel(): Model<any> {
     };
   }
 
+  if (!resolveApiKey(provider) && provider !== "ollama") {
+    console.error(`\x1b[31mError: Missing API key for provider "${provider}".\x1b[0m`);
+    console.error("\x1b[31mSet WONIU_API_KEY or the provider-specific API key before starting the CLI.\x1b[0m");
+    process.exit(1);
+  }
+
   try {
     const knownProvider = provider as KnownProvider;
     const model = getModels(knownProvider).find((entry) => entry.id === modelId);
@@ -313,6 +322,102 @@ export function resolveModel(): Model<any> {
 
 interface CreateOrchestratorOptions {
   confirmExecution?: ConfirmExecution;
+}
+
+function extractMessageText(message: AgentMessage): string {
+  if (!("content" in message)) return "";
+
+  if (typeof message.content === "string") {
+    return message.content.trim();
+  }
+
+  if (!Array.isArray(message.content)) return "";
+
+  return message.content
+    .filter((block): block is Extract<typeof block, { type: "text" }> => block.type === "text")
+    .map((block) => block.text)
+    .join("")
+    .trim();
+}
+
+function summarizeMessageText(text: string, maxLength = 280): string {
+  if (!text) return "";
+
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const skillMatch = normalized.match(/<skill name="([^"]+)"/);
+  if (skillMatch) {
+    return `[loaded skill: ${skillMatch[1]}]`;
+  }
+
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
+function extractPreferenceHints(messages: AgentMessage[]): string[] {
+  const preferences = new Set<string>();
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!("role" in message) || message.role !== "user") continue;
+
+    const text = extractMessageText(message);
+    if (!text) continue;
+
+    if (/(后续|以后|之后|接下来).*(简洁|简短|精炼)|输出简洁|concise|brief/i.test(text)) {
+      preferences.add("Keep answers concise unless the user asks for more detail.");
+    }
+    if (/(请用中文|用中文|中文回答|中文输出|reply in chinese)/i.test(text)) {
+      preferences.add("Reply in Chinese.");
+    }
+    if (/(请用英文|用英文|英文回答|英文输出|reply in english)/i.test(text)) {
+      preferences.add("Reply in English.");
+    }
+    if (/(直接一点|直接回答|别废话|don't explain too much)/i.test(text)) {
+      preferences.add("Prefer direct answers over long explanations.");
+    }
+  }
+
+  return [...preferences];
+}
+
+function extractActiveSkills(messages: AgentMessage[]): string[] {
+  const skills = new Set<string>();
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = extractMessageText(messages[index]);
+    if (!text) continue;
+
+    for (const match of text.matchAll(/<skill name="([^"]+)"/g)) {
+      skills.add(match[1]);
+      if (skills.size >= 3) return [...skills];
+    }
+  }
+
+  return [...skills];
+}
+
+function extractRecentConversation(messages: AgentMessage[], maxMessages = 6): string[] {
+  const conversation: string[] = [];
+
+  for (let index = messages.length - 1; index >= 0 && conversation.length < maxMessages; index -= 1) {
+    const message = messages[index];
+    if (!("role" in message)) continue;
+    if (message.role !== "user" && message.role !== "assistant") continue;
+
+    const summary = summarizeMessageText(extractMessageText(message));
+    if (!summary) continue;
+    conversation.push(`${message.role}: ${summary}`);
+  }
+
+  return conversation.reverse();
+}
+
+function buildDelegationContext(agent: Agent): DelegationContext {
+  return {
+    preferences: extractPreferenceHints(agent.state.messages),
+    activeSkills: extractActiveSkills(agent.state.messages),
+    recentConversation: extractRecentConversation(agent.state.messages),
+  };
 }
 
 function formatSkillMetadata(skills: SkillRecord[]): string {
@@ -334,7 +439,10 @@ function applyOrchestratorConfig(
       confirmExecution: options.confirmExecution,
     }),
     makeLoadSkillTool(skills),
-    makeDelegateToCoderTool(() => createCoder(model)),
+    makeDelegateToCoderTool(
+      () => createCoder(model, options),
+      () => buildDelegationContext(agent),
+    ),
   ];
 }
 
@@ -352,14 +460,17 @@ export function createOrchestrator(
   return agent;
 }
 
-export function createCoder(model: Model<any>): Agent {
+export function createCoder(model: Model<any>, options: CreateOrchestratorOptions = {}): Agent {
   return new Agent({
     getApiKey: (provider) => resolveApiKey(provider),
     initialState: {
       systemPrompt: CODER_PROMPT,
       model,
       tools: [
-        makeExecuteCodeTool({ requireConfirm: false }),
+        makeExecuteCodeTool({
+          requireConfirm: true,
+          confirmExecution: options.confirmExecution,
+        }),
       ],
     },
   });

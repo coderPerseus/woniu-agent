@@ -22,9 +22,16 @@ export interface SkillRecord {
   baseDir: string;
 }
 
+export interface DelegationContext {
+  preferences: string[];
+  activeSkills: string[];
+  recentConversation: string[];
+}
+
 export type ExecutionLanguage = "shell" | "javascript" | "typescript";
 export type ConfirmExecution = (language: ExecutionLanguage, code: string) => Promise<boolean>;
 export type CreateCoderAgent = () => Agent;
+export type GetDelegationContext = () => DelegationContext;
 
 // ═══════════════════════════════════════════════
 // SKILL.md Frontmatter Parser
@@ -236,6 +243,25 @@ export function makeLoadSkillTool(skills: SkillRecord[]): AgentTool<typeof LoadS
 // Tool: delegate_to_coder
 // ═══════════════════════════════════════════════
 
+function buildDelegationPrompt(task: string, context: DelegationContext): string {
+  const sections = [`Task:\n${task.trim()}`];
+
+  if (context.preferences.length > 0) {
+    sections.push(`User preferences:\n- ${context.preferences.join("\n- ")}`);
+  }
+
+  if (context.activeSkills.length > 0) {
+    sections.push(`Active skills:\n- ${context.activeSkills.join("\n- ")}`);
+  }
+
+  if (context.recentConversation.length > 0) {
+    sections.push(`Recent conversation:\n${context.recentConversation.join("\n")}`);
+  }
+
+  sections.push("Complete the task using the context above. Preserve the user's preferences in your final answer.");
+  return sections.join("\n\n");
+}
+
 function extractAssistantText(agent: Agent): string {
   for (let index = agent.state.messages.length - 1; index >= 0; index -= 1) {
     const message = agent.state.messages[index];
@@ -252,7 +278,10 @@ function extractAssistantText(agent: Agent): string {
   return "";
 }
 
-export function makeDelegateToCoderTool(createCoderAgent: CreateCoderAgent): AgentTool<typeof DelegateToCoderParams, Record<string, unknown>> {
+export function makeDelegateToCoderTool(
+  createCoderAgent: CreateCoderAgent,
+  getDelegationContext: GetDelegationContext,
+): AgentTool<typeof DelegateToCoderParams, Record<string, unknown>> {
   return {
     name: "delegate_to_coder",
     label: "Delegate to Coder",
@@ -260,6 +289,7 @@ export function makeDelegateToCoderTool(createCoderAgent: CreateCoderAgent): Age
     parameters: DelegateToCoderParams,
     execute: async (_toolCallId, params) => {
       const coder = createCoderAgent();
+      const context = getDelegationContext();
       const dim = "\x1b[2m";
       const purple = "\x1b[38;5;141m";
       const reset = "\x1b[0m";
@@ -289,7 +319,7 @@ export function makeDelegateToCoderTool(createCoderAgent: CreateCoderAgent): Age
       });
 
       try {
-        await coder.prompt(params.task);
+        await coder.prompt(buildDelegationPrompt(params.task, context));
         await coder.waitForIdle();
       } finally {
         unsubscribe();
@@ -297,7 +327,7 @@ export function makeDelegateToCoderTool(createCoderAgent: CreateCoderAgent): Age
       }
 
       const result = transcript || extractAssistantText(coder) || "(Coder Agent returned no output)";
-      return toToolResult(result, { delegated: true });
+      return toToolResult(result, { delegated: true, context });
     },
   };
 }
