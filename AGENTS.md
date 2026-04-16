@@ -78,7 +78,7 @@
    - **质量保障专家（Quality Assurance）**
      - 负责功能测试、回归测试、边界场景验证
      - 典型任务：
-       - `npm run typecheck`
+       - `pnpm run typecheck`
        - smoke test
        - 多轮对话验证
        - 委派链路验证
@@ -108,9 +108,9 @@
 - **参数定义**：`@sinclair/typebox`
 - **技能格式**：`SKILL.md`（YAML frontmatter + Markdown body）
 - **启动方式**：
-  - `npm start`
-  - `npm run dev`
-  - `npm run typecheck`
+  - `pnpm start`
+  - `pnpm run dev`
+  - `pnpm run typecheck`
 
 ## 当前项目的核心模块
 
@@ -144,7 +144,7 @@
 - 子 Agent 不能绕过主 Agent 的安全边界
 - 上下文传递必须是“最小必要上下文”，不能无边界复制整段历史
 - Skill 系统必须兼容当前 `SKILL.md` 结构和目录发现规则
-- 默认先跑 `npm run typecheck`，再做最小 smoke test
+- 默认先跑 `pnpm run typecheck`，再做最小 smoke test
 - 不提交 `node_modules/`、临时文件、系统垃圾文件
 
 ## 任务拆分模板

@@ -20,7 +20,7 @@
 ## 安装
 
 ```bash
-npm install
+pnpm install
 ```
 
 ## 运行
@@ -32,25 +32,25 @@ export WONIU_BASE_URL=https://api.deepseek.com/v1
 export WONIU_MODEL=deepseek-chat
 export WONIU_API_KEY=sk-xxx 
 
-npm start
+pnpm start
 ```
 
 如果要关闭执行确认：
 
 ```bash
-npm start -- --yolo
+pnpm start -- --yolo
 ```
 
 开发模式：
 
 ```bash
-npm run dev
+pnpm run dev
 ```
 
 类型检查：
 
 ```bash
-npm run typecheck
+pnpm run typecheck
 ```
 
 ## 环境变量

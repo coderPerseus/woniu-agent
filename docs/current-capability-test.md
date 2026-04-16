@@ -13,8 +13,8 @@
 ## 前置准备
 
 ```bash
-npm install
-npm run typecheck
+pnpm install
+pnpm run typecheck
 
 export WONIU_PROVIDER=deepseek
 export WONIU_BASE_URL=https://api.deepseek.com/v1
@@ -25,13 +25,13 @@ export WONIU_API_KEY=sk-xxx
 启动：
 
 ```bash
-npm start
+pnpm start
 ```
 
 如果要跳过执行确认：
 
 ```bash
-npm start -- --yolo
+pnpm start -- --yolo
 ```
 
 ## 快速验收
