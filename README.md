@@ -144,7 +144,6 @@ LLM 自动调用：
 .
 ├── package.json
 ├── README.md
-├── dist/                # 当前内置了一份 pi-mono TUI 依赖代码
 ├── skills/
 │   └── translator/
 │       └── SKILL.md

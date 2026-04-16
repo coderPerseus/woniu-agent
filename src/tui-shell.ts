@@ -1,16 +1,17 @@
 import * as readline from "node:readline/promises";
 
-import type { SkillRecord } from "./tools.js";
-import { getSlashCommandRecords } from "./agents.js";
-import type { ExecutionLanguage } from "./tools.js";
 import {
   CombinedAutocompleteProvider,
-} from "../dist/pi-mono/packages/tui/src/autocomplete.ts";
-import { Editor, type EditorTheme } from "../dist/pi-mono/packages/tui/src/components/editor.ts";
-import { Text } from "../dist/pi-mono/packages/tui/src/components/text.ts";
-import { matchesKey } from "../dist/pi-mono/packages/tui/src/keys.ts";
-import { ProcessTerminal } from "../dist/pi-mono/packages/tui/src/terminal.ts";
-import { TUI } from "../dist/pi-mono/packages/tui/src/tui.ts";
+  Editor,
+  matchesKey,
+  ProcessTerminal,
+  Text,
+  TUI,
+  type EditorTheme,
+} from "@mariozechner/pi-tui";
+
+import { getSlashCommandRecords } from "./agents.js";
+import type { ExecutionLanguage, SkillRecord } from "./tools.js";
 
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
@@ -98,7 +99,7 @@ export class TuiShell {
     onCtrlC?: () => void,
   ) {
     this.header.setText(buildBanner(provider, modelId, yolo, baseUrl));
-    this.editor.onSubmit = (text) => {
+    this.editor.onSubmit = (text: string) => {
       const resolve = this.pendingSubmitResolve;
       if (!resolve) return;
       this.pendingSubmitResolve = undefined;
@@ -109,7 +110,7 @@ export class TuiShell {
     this.tui.addChild(this.header);
     this.tui.addChild(this.transcript);
     this.tui.addChild(this.editor);
-    this.tui.addInputListener((data) => {
+    this.tui.addInputListener((data: string) => {
       if (matchesKey(data, "ctrl+c")) {
         onCtrlC?.();
         return { consume: true };
@@ -229,6 +230,7 @@ export class TuiShell {
       }
     }
   }
+
   private pushTranscriptEntry(text: string): void {
     this.transcriptEntries.push(text);
     this.flushTranscript();
