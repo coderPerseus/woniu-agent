@@ -2,11 +2,12 @@
 
 `woniu-code` 是一个最小可运行的多 Agent CLI Demo，基于 `pi-ai` 和 `pi-agent-core` 构建。
 
-它提供四类核心能力：
+它提供五类核心能力：
 
 - `execute_code`: 执行 shell、JavaScript、TypeScript，主 Agent 和 Coder Agent 执行前都会请求确认
 - `load_skill`: 从 `SKILL.md` 加载技能 Prompt，支持用户主动调用和 LLM 按需调用
 - `delegate_to_coder`: 将复杂编程任务委派给专用 Coder Agent，并在终端中流式打印其执行过程
+- `memory`: 将用户偏好、环境事实和可复用经验写入本地长期记忆文件
 - `context handoff`: 子 Agent 会继承用户偏好、最近几轮对话摘要和当前激活的 skill
 
 运行时有两种交互模式：
@@ -61,6 +62,7 @@ pnpm run typecheck
 | `WONIU_PROVIDER` | 否 | `anthropic` | Provider 名称 |
 | `WONIU_MODEL` | 否 | `claude-sonnet-4-20250514` | 模型 ID |
 | `WONIU_BASE_URL` | 否 | - | 自定义 OpenAI 兼容端点 |
+| `WONIU_MEMORY_DIR` | 否 | `~/.woniu/memories` | 覆盖 memory 文件目录，便于测试或隔离环境 |
 
 示例：
 
@@ -77,6 +79,44 @@ export WONIU_PROVIDER=deepseek WONIU_BASE_URL=https://api.deepseek.com/v1 WONIU_
 # Ollama
 export WONIU_PROVIDER=ollama WONIU_BASE_URL=http://localhost:11434/v1 WONIU_MODEL=llama3
 ```
+
+## Memory 系统
+
+最简版 memory 采用 Hermes 风格的启动快照策略：
+
+- 记忆文件保存在 `~/.woniu/memories/`
+- `MEMORY.md` 保存环境事实、仓库约定、复用价值高的经验
+- `USER.md` 保存稳定的用户偏好与画像
+- CLI 启动时会读取这两份文件，并将内容作为本次 session 的 frozen snapshot 注入 system prompt
+- 会话中如果 Agent 调用了 `memory` tool，只会写盘，不会刷新当前 session 的 prompt；下次启动后生效
+
+文件内容按 `§` 分隔条目，例如：
+
+```md
+Reply in Chinese unless the user asks otherwise.
+
+§
+
+Project prefers minimal, stable implementations over feature expansion.
+```
+
+memory tool 支持三种动作：
+
+- `add`: 追加一条新记忆
+- `replace`: 按 `old_text` 定位并替换一条记忆
+- `remove`: 按 `old_text` 定位并删除一条记忆
+
+建议保存的内容：
+
+- 用户明确声明的稳定偏好
+- 经常影响执行方式的环境事实
+- 出错后总结出的可复用经验
+
+不要保存的内容：
+
+- 当前任务进度
+- 临时上下文
+- 敏感信息或密钥
 
 ## Skill 系统
 
@@ -150,6 +190,7 @@ LLM 自动调用：
 └── src/
     ├── agents.ts        # Model 解析 + Skill 扫描 + Agent 工厂
     ├── index.ts         # Banner + REPL + Slash 命令
+    ├── memory.ts        # 本地长期记忆文件读写
     ├── tui-shell.ts     # TUI 交互层 + slash command 自动补全
     └── tools.ts         # Tool 定义 + SKILL.md 解析
 ```

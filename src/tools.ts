@@ -10,6 +10,15 @@ import { Agent } from "@mariozechner/pi-agent-core";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import YAML from "yaml";
 
+import {
+  addMemoryEntry,
+  formatUsageSummary,
+  removeMemoryEntry,
+  replaceMemoryEntry,
+  type MemoryMutationResult,
+  type MemoryTarget,
+} from "./memory.js";
+
 // ═══════════════════════════════════════════════
 // Shared Types
 // ═══════════════════════════════════════════════
@@ -72,6 +81,20 @@ const LoadSkillParams = Type.Object({
 
 const DelegateToCoderParams = Type.Object({
   task: Type.String({ description: "Programming task to delegate" }),
+});
+
+const MemoryParams = Type.Object({
+  action: Type.Union([
+    Type.Literal("add"),
+    Type.Literal("replace"),
+    Type.Literal("remove"),
+  ], { description: "Memory mutation to perform" }),
+  target: Type.Union([
+    Type.Literal("memory"),
+    Type.Literal("user"),
+  ], { description: "Which memory file to update" }),
+  content: Type.Optional(Type.String({ description: "New entry content for add/replace" })),
+  old_text: Type.Optional(Type.String({ description: "Text used to find an existing entry for replace/remove" })),
 });
 
 // ═══════════════════════════════════════════════
@@ -235,6 +258,80 @@ export function makeLoadSkillTool(skills: SkillRecord[]): AgentTool<typeof LoadS
       ].filter(Boolean);
 
       return toToolResult(blocks.join("\n"), { filePath: skill.filePath });
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════
+// Tool: memory
+// ═══════════════════════════════════════════════
+
+function formatMemoryResult(action: string, result: MemoryMutationResult): string {
+  const title = result.target === "memory" ? "MEMORY.md" : "USER.md";
+  const lines = [
+    result.changed
+      ? `${title} updated via ${action}.`
+      : `${title} already contained that entry. No change made.`,
+    `Usage: ${formatUsageSummary(result.usage)}`,
+  ];
+
+  if (result.entries.length === 0) {
+    lines.push("Entries: (empty)");
+  } else {
+    lines.push("Entries:");
+    for (const [index, entry] of result.entries.entries()) {
+      lines.push(`${index + 1}. ${entry}`);
+    }
+  }
+
+  lines.push("Changes are saved to disk and will be loaded on the next session start.");
+  return lines.join("\n");
+}
+
+export function makeMemoryTool(): AgentTool<typeof MemoryParams, Record<string, unknown>> {
+  return {
+    name: "memory",
+    label: "Memory",
+    description: "Persist concise long-term facts about the user or environment to MEMORY.md or USER.md.",
+    parameters: MemoryParams,
+    execute: async (_toolCallId, params) => {
+      let result: MemoryMutationResult;
+      const target = params.target as MemoryTarget;
+
+      switch (params.action) {
+        case "add":
+          if (!params.content?.trim()) {
+            throw new Error("memory add requires non-empty content.");
+          }
+          result = addMemoryEntry(target, params.content);
+          break;
+        case "replace":
+          if (!params.old_text?.trim()) {
+            throw new Error("memory replace requires old_text.");
+          }
+          if (!params.content?.trim()) {
+            throw new Error("memory replace requires non-empty content.");
+          }
+          result = replaceMemoryEntry(target, params.old_text, params.content);
+          break;
+        case "remove":
+          if (!params.old_text?.trim()) {
+            throw new Error("memory remove requires old_text.");
+          }
+          result = removeMemoryEntry(target, params.old_text);
+          break;
+        default:
+          throw new Error(`Unsupported memory action: ${params.action}`);
+      }
+
+      return toToolResult(formatMemoryResult(params.action, result), {
+        action: params.action,
+        changed: result.changed,
+        entries: result.entries,
+        filePath: result.filePath,
+        target: result.target,
+        usage: result.usage,
+      });
     },
   };
 }

@@ -11,6 +11,7 @@ import {
   scanSkills,
   searchSlashCommands,
 } from "./agents.js";
+import { formatMemoryForPrompt } from "./memory.js";
 import { TuiShell } from "./tui-shell.js";
 import type { SkillRecord } from "./tools.js";
 import type { ExecutionLanguage } from "./tools.js";
@@ -112,6 +113,7 @@ async function runFallbackCli(runtimeOptions: RuntimeOptions): Promise<void> {
   const modelId = process.env.WONIU_MODEL ?? "claude-sonnet-4-20250514";
   const baseUrl = process.env.WONIU_BASE_URL;
   const model = resolveModel();
+  const memorySnapshot = formatMemoryForPrompt();
 
   printConfig(provider, modelId, runtimeOptions, baseUrl);
 
@@ -126,6 +128,7 @@ async function runFallbackCli(runtimeOptions: RuntimeOptions): Promise<void> {
   rl.on("SIGINT", handleForceExit);
   const agent = createOrchestrator(model, skills, {
     confirmExecution,
+    memorySnapshot,
     requireExecutionConfirm: !runtimeOptions.yolo,
   });
 
@@ -167,6 +170,7 @@ async function runFallbackCli(runtimeOptions: RuntimeOptions): Promise<void> {
       skills = scanSkills().skills;
       refreshOrchestratorSkills(agent, model, skills, {
         confirmExecution,
+        memorySnapshot,
         requireExecutionConfirm: !runtimeOptions.yolo,
       });
       const raw = await rl.question(`${PURPLE}❯ ${RESET}`);
@@ -227,6 +231,7 @@ async function runTuiCli(runtimeOptions: RuntimeOptions): Promise<void> {
   const modelId = process.env.WONIU_MODEL ?? "claude-sonnet-4-20250514";
   const baseUrl = process.env.WONIU_BASE_URL;
   const model = resolveModel();
+  const memorySnapshot = formatMemoryForPrompt();
 
   let { skills } = scanSkills();
   let shell: TuiShell;
@@ -238,6 +243,7 @@ async function runTuiCli(runtimeOptions: RuntimeOptions): Promise<void> {
   process.on("SIGINT", handleForceExit);
   const agent = createOrchestrator(model, skills, {
     confirmExecution,
+    memorySnapshot,
     requireExecutionConfirm: !runtimeOptions.yolo,
   });
 
@@ -287,6 +293,7 @@ async function runTuiCli(runtimeOptions: RuntimeOptions): Promise<void> {
       skills = scanSkills().skills;
       refreshOrchestratorSkills(agent, model, skills, {
         confirmExecution,
+        memorySnapshot,
         requireExecutionConfirm: !runtimeOptions.yolo,
       });
       const raw = await shell.ask(skills);
