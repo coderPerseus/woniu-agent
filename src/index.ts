@@ -28,6 +28,55 @@ interface RuntimeOptions {
   yolo: boolean;
 }
 
+function formatToolExecutionStart(toolName: string, args?: unknown): string {
+  if (toolName !== "execute_code" || !args || typeof args !== "object") {
+    return `${DIM}⚙ ${toolName}...${RESET}`;
+  }
+
+  const language = "language" in args && typeof args.language === "string"
+    ? args.language
+    : "unknown";
+  const code = "code" in args && typeof args.code === "string"
+    ? args.code.trim()
+    : "";
+
+  if (!code) {
+    return `${DIM}⚙ execute_code${RESET}`;
+  }
+
+  return [
+    `${DIM}⚙ execute_code${RESET}`,
+    `\x1b[36m[${language}]${RESET}`,
+    code,
+  ].join("\n");
+}
+
+function formatToolExecutionEnd(toolName: string): string {
+  return toolName === "execute_code"
+    ? `${DIM}⚙ execute_code${RESET}`
+    : `${DIM}✓ ${toolName}${RESET}`;
+}
+
+function extractToolUpdateText(partialResult: unknown): string {
+  if (!partialResult || typeof partialResult !== "object" || !("content" in partialResult)) {
+    return "";
+  }
+
+  const content = partialResult.content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .filter((block): block is { type: "text"; text: string } =>
+      typeof block === "object"
+      && block !== null
+      && "type" in block
+      && "text" in block
+      && block.type === "text"
+      && typeof block.text === "string")
+    .map((block) => block.text)
+    .join("");
+}
+
 function bannerText(): string {
   return `
 ${PURPLE}${BOLD}██╗    ██╗ ██████╗ ███╗   ██╗██╗██╗   ██╗${RESET}
@@ -140,11 +189,24 @@ async function runFallbackCli(runtimeOptions: RuntimeOptions): Promise<void> {
         }
         break;
       case "tool_execution_start":
-        process.stdout.write(`\n${DIM}⚙ ${event.toolName}...${RESET}\n`);
+        process.stdout.write(`\n${formatToolExecutionStart(event.toolName, event.args)}\n`);
         break;
+      case "tool_execution_update": {
+        const text = extractToolUpdateText(event.partialResult);
+        if (text) {
+          process.stdout.write(text);
+        }
+        break;
+      }
       case "tool_execution_end":
         if (event.isError) {
-          process.stdout.write(`${DIM}✗ failed${RESET}\n`);
+          if (event.toolName === "execute_code") {
+            process.stdout.write(`${DIM}✗ failed${RESET}\n${formatToolExecutionEnd(event.toolName)}\n`);
+          } else {
+            process.stdout.write(`${DIM}✗ failed${RESET}\n`);
+          }
+        } else {
+          process.stdout.write(`${formatToolExecutionEnd(event.toolName)}\n`);
         }
         break;
       case "turn_end":
@@ -255,11 +317,20 @@ async function runTuiCli(runtimeOptions: RuntimeOptions): Promise<void> {
         }
         break;
       case "tool_execution_start":
-        shell.addToolExecutionStart(event.toolName);
+        shell.addToolExecutionStart(event.toolName, event.args);
         break;
+      case "tool_execution_update": {
+        const text = extractToolUpdateText(event.partialResult);
+        if (text) {
+          shell.appendToolExecutionUpdate(text);
+        }
+        break;
+      }
       case "tool_execution_end":
         if (event.isError) {
-          shell.addToolExecutionError();
+          shell.addToolExecutionError(event.toolName);
+        } else {
+          shell.addToolExecutionEnd(event.toolName);
         }
         break;
       case "turn_end":

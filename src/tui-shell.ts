@@ -77,6 +77,35 @@ function formatSkillList(skills: SkillRecord[], query = ""): string {
   return lines.join("\n");
 }
 
+function formatToolExecutionStart(toolName: string, args?: unknown): string {
+  if (toolName !== "execute_code" || !args || typeof args !== "object") {
+    return color(DIM, `⚙ ${toolName}...`);
+  }
+
+  const language = "language" in args && typeof args.language === "string"
+    ? args.language
+    : "unknown";
+  const code = "code" in args && typeof args.code === "string"
+    ? args.code.trim()
+    : "";
+
+  if (!code) {
+    return color(DIM, "⚙ execute_code");
+  }
+
+  return [
+    color(DIM, "⚙ execute_code"),
+    color(CYAN, `[${language}]`),
+    code,
+  ].join("\n");
+}
+
+function formatToolExecutionEnd(toolName: string): string {
+  return toolName === "execute_code"
+    ? color(DIM, "⚙ execute_code")
+    : color(DIM, `✓ ${toolName}`);
+}
+
 export class TuiShell {
   private readonly tui = new TUI(new ProcessTerminal());
   private readonly header = new Text("", 1, 0);
@@ -89,6 +118,7 @@ export class TuiShell {
   private pendingSubmitResolve?: (value: string) => void;
   private pendingSubmitReject?: (error: unknown) => void;
   private currentAssistantIndex: number | null = null;
+  private currentToolIndex: number | null = null;
   private started = false;
 
   constructor(
@@ -200,14 +230,37 @@ export class TuiShell {
     this.flushTranscript();
   }
 
-  addToolExecutionStart(toolName: string): void {
+  addToolExecutionStart(toolName: string, args?: unknown): void {
     this.currentAssistantIndex = null;
-    this.pushTranscriptEntry(color(DIM, `⚙ ${toolName}...`));
+    this.currentToolIndex = this.transcriptEntries.length;
+    this.transcriptEntries.push(formatToolExecutionStart(toolName, args));
+    this.flushTranscript();
   }
 
-  addToolExecutionError(): void {
+  appendToolExecutionUpdate(delta: string): void {
+    if (!delta) return;
+    if (this.currentToolIndex === null) {
+      this.currentToolIndex = this.transcriptEntries.length;
+      this.transcriptEntries.push("");
+    }
+
+    const prefix = this.transcriptEntries[this.currentToolIndex].endsWith("\n") || delta.startsWith("\n") ? "" : "\n";
+    this.transcriptEntries[this.currentToolIndex] += `${prefix}${delta}`;
+    this.flushTranscript();
+  }
+
+  addToolExecutionEnd(toolName: string): void {
     this.currentAssistantIndex = null;
-    this.pushTranscriptEntry(color(DIM, "✗ failed"));
+    this.currentToolIndex = null;
+    this.pushTranscriptEntry(formatToolExecutionEnd(toolName));
+  }
+
+  addToolExecutionError(toolName?: string): void {
+    this.currentAssistantIndex = null;
+    this.currentToolIndex = null;
+    this.pushTranscriptEntry(toolName === "execute_code"
+      ? `${color(DIM, "✗ failed")}\n${formatToolExecutionEnd(toolName)}`
+      : color(DIM, "✗ failed"));
   }
 
   async confirmExecution(language: ExecutionLanguage, code: string): Promise<boolean> {

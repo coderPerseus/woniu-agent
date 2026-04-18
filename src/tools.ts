@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -106,6 +106,10 @@ interface ExecuteCodeOptions {
   confirmExecution?: ConfirmExecution;
 }
 
+interface ToolUpdateSender {
+  (update: { content: TextContent[]; details: Record<string, unknown> }): void;
+}
+
 function textContent(text: string): TextContent {
   return { type: "text", text };
 }
@@ -119,56 +123,133 @@ function trimOutput(output: string, maxLength = 4096): string {
   return `${output.slice(0, maxLength)}\n...(truncated)`;
 }
 
-function formatCombinedOutput(stdout: string, stderr: string): string {
-  const pieces = [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean);
-  return pieces.join("\n");
+function emitToolTextUpdate(
+  onUpdate: ToolUpdateSender | undefined,
+  text: string,
+  details: Record<string, unknown> = {},
+): void {
+  if (!onUpdate || !text) return;
+  onUpdate({ content: [textContent(text)], details });
 }
 
 // ═══════════════════════════════════════════════
 // Code Execution
 // ═══════════════════════════════════════════════
 
-function runShell(code: string): string {
-  const result = spawnSync(code, {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024,
-    shell: process.env.SHELL || true,
-    timeout: 30_000,
+async function runProcess(
+  command: string,
+  args: string[],
+  options: {
+    code: string;
+    cwd: string;
+    language: ExecutionLanguage;
+    onUpdate?: ToolUpdateSender;
+    shell?: string | boolean;
+    signal?: AbortSignal;
+  },
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: process.env,
+      shell: options.shell,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let output = "";
+    let settled = false;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      options.signal?.removeEventListener("abort", abortHandler);
+      callback();
+    };
+
+    const appendChunk = (chunk: string, stream: "stdout" | "stderr") => {
+      if (!chunk) return;
+      output += chunk;
+      emitToolTextUpdate(options.onUpdate, chunk, {
+        language: options.language,
+        stream,
+      });
+    };
+
+    const abortHandler = () => {
+      child.kill("SIGTERM");
+      finish(() => reject(new Error("Execution aborted.")));
+    };
+
+    timeoutHandle = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(() => reject(new Error("Execution timed out after 30 seconds.")));
+    }, 30_000);
+
+    options.signal?.addEventListener("abort", abortHandler, { once: true });
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => appendChunk(chunk, "stdout"));
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => appendChunk(chunk, "stderr"));
+
+    child.on("error", (error) => {
+      finish(() => reject(error));
+    });
+
+    child.on("close", (code, signal) => {
+      finish(() => {
+        const normalizedOutput = output.trimEnd();
+        if (code === 0) {
+          resolve(normalizedOutput || "(no output)");
+          return;
+        }
+
+        reject(
+          new Error(
+            normalizedOutput || `Process exited with code ${code ?? "unknown"}${signal ? ` (signal: ${signal})` : ""}`,
+          ),
+        );
+      });
+    });
   });
-
-  if (result.error) throw result.error;
-
-  const output = formatCombinedOutput(result.stdout ?? "", result.stderr ?? "");
-  if (result.status !== 0) {
-    throw new Error(output || `Shell command exited with code ${result.status ?? "unknown"}`);
-  }
-
-  return output || "(no output)";
 }
 
-function runScript(language: Exclude<ExecutionLanguage, "shell">, code: string): string {
+async function runShell(
+  code: string,
+  signal?: AbortSignal,
+  onUpdate?: ToolUpdateSender,
+): Promise<string> {
+  return runProcess(code, [], {
+    code,
+    cwd: process.cwd(),
+    language: "shell",
+    onUpdate,
+    shell: process.env.SHELL || true,
+    signal,
+  });
+}
+
+async function runScript(
+  language: Exclude<ExecutionLanguage, "shell">,
+  code: string,
+  signal?: AbortSignal,
+  onUpdate?: ToolUpdateSender,
+): Promise<string> {
   const extension = language === "typescript" ? "ts" : "js";
   const tempFile = path.join(os.tmpdir(), `woniu-code-${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`);
 
   fs.writeFileSync(tempFile, code, "utf8");
 
   try {
-    const result = spawnSync("npx", ["tsx", tempFile], {
+    return await runProcess("npx", ["tsx", tempFile], {
+      code,
       cwd: process.cwd(),
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-      timeout: 30_000,
+      language,
+      onUpdate,
+      signal,
     });
-
-    if (result.error) throw result.error;
-
-    const output = formatCombinedOutput(result.stdout ?? "", result.stderr ?? "");
-    if (result.status !== 0) {
-      throw new Error(output || `Script exited with code ${result.status ?? "unknown"}`);
-    }
-
-    return output || "(no output)";
   } finally {
     fs.rmSync(tempFile, { force: true });
   }
@@ -207,7 +288,7 @@ export function makeExecuteCodeTool(options: ExecuteCodeOptions = {}): AgentTool
     label: "Execute Code",
     description: "Execute shell commands or JavaScript/TypeScript and return the output.",
     parameters: ExecuteCodeParams,
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId, params, signal, onUpdate) => {
       if (requireConfirm) {
         const approved = await confirmExecution(params.language, params.code);
         if (!approved) {
@@ -216,8 +297,8 @@ export function makeExecuteCodeTool(options: ExecuteCodeOptions = {}): AgentTool
       }
 
       const output = params.language === "shell"
-        ? runShell(params.code)
-        : runScript(params.language, params.code);
+        ? await runShell(params.code, signal, onUpdate)
+        : await runScript(params.language, params.code, signal, onUpdate);
 
       return toToolResult(trimOutput(output), { language: params.language });
     },
